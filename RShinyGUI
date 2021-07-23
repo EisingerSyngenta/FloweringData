@@ -1,0 +1,167 @@
+packages <- c("httr", "jsonlite", "readr", "dplyr", "magrittr", "shiny", "shinythemes")
+
+package.check <- lapply(
+  packages,
+  FUN = function(x) {
+    if (!require(x, character.only = TRUE)) {
+      install.packages(x, dependencies = TRUE)
+      library(x, character.only = TRUE)
+    }
+  }
+)
+
+
+
+
+
+##
+ui <- shinyUI({
+  sidebarPanel(
+    
+    htmlOutput("loc_selector"),
+    htmlOutput("field_selector"),
+    htmlOutput("start_selector"),
+    htmlOutput("end_selector"),
+    textOutput("gdu")
+    
+    
+  )
+  
+})
+##
+server <- shinyServer(function(input, output) {
+  urlfile <- "https://raw.githubusercontent.com/EisingerSyngenta/FloweringData/main/2021%20Flowering%20Coordinates.csv"
+  mydata <- read_csv(url(urlfile))
+  
+  output$loc_selector <- renderUI({
+    
+    selectInput(
+      inputId = "loc", 
+      label = "Location:",
+      choices = as.character(unique(mydata$Location)))
+    
+  })
+  
+  output$field_selector <- renderUI({
+    
+    available <- mydata %>% 
+      filter(Location == input$loc) %>% 
+      select(Field)
+    
+    selectInput(
+      inputId = "field", 
+      label = "Field:",
+      choices = unique(available))
+    
+  })
+  
+  output$start_selector <- renderUI({
+    
+    available <- mydata %>% 
+      filter(Location == input$loc, Field == input$field) %>% 
+      select(PlantingDate)
+    available$PlantingDate <- strptime(available$PlantingDate, "%m/%d/%Y")
+    available$PlantingDate <- format(available$PlantingDate, "%Y-%m-%d")
+    firstDate <- as.character(seq(as.Date(available$PlantingDate[1]), as.Date(Sys.Date()), by = "days"))
+    
+    selectInput(
+      inputId = "start", 
+      label = "First Date:",
+      choices = firstDate)
+    
+  })
+  
+  output$end_selector <- renderUI({
+    
+    end <- as.character(seq(as.Date(input$start), as.Date(Sys.Date()), by = "days"))
+    
+    selectInput(
+      inputId = "end", 
+      label = "End Date:",
+      choices = end)
+    
+  })
+  
+  output$gdu <- renderText({
+    
+    input$action
+    
+    lat <- mydata %>% 
+      filter(Location == input$loc, Field == input$field) %>% 
+      select(Latitude)
+    long <- mydata %>% 
+      filter(Location == input$loc, Field == input$field) %>% 
+      select(Longitude)
+    
+    long <- long$Longitude[1]
+    lat <- lat$Latitude[1]
+    start <- input$start
+    end <- input$end
+    
+    
+    
+    posting <- paste0('{
+                      "units": {
+                      "temperature": "F",
+                      "velocity": "mph",
+                      "length": "imperial",
+                      "energy": "watts"
+                      },
+                      "geometry": {
+                      "type": "MultiPoint",
+                      "coordinates": [
+                      [
+                      ', long,',
+                      ', lat, '
+                      ]
+                      ],
+                      "locationNames": [
+                      ""
+                      ]
+                      },
+                      "format": "json",
+                      "timeIntervals": [
+                      "', start, 'T+00:00/', end, 'T+00:00"
+                      ],
+                      "timeIntervalsAlignment": "none",
+                      "queries": [
+                      {
+                      "domain": "ERA5",
+                      "gapFillDomain": "NEMSGLOBAL",
+                      "timeResolution": "daily",
+                      "codes": [
+                      {
+                      "code": 730,
+                      "level": "2 m elevation corrected",
+                      "aggregation": "sum",
+                      "gddBase": 50,
+                      "gddLimit": 86
+                      }
+                      ]
+                      }
+                      ]
+  }
+                      ')
+
+        url <- "http://my.meteoblue.com/dataset/query?apikey=syn82hw2eqe"
+
+        result <- POST(url,
+                       body = posting,
+                       httr::add_headers(`accept` = 'application/json'),
+                       httr::content_type('application/json')) #encode="json"
+        response <- content(result)
+
+        toSum <- vector()
+        for(i in 1:length(response[[1]]$codes[[1]]$dataPerTimeInterval[[1]]$data[[1]])) {
+          toSum[i] <- response[[1]]$codes[[1]]$dataPerTimeInterval[[1]]$data[[1]][[i]]
+        }
+        gdu <- round(sum(toSum))
+        
+        isolate(gdu)
+
+  })
+  
+  
+})
+##
+shinyApp(ui = ui, server = server)
