@@ -1,104 +1,97 @@
-packages <- c("httr", "jsonlite", "readr", "dplyr", "magrittr", "shiny", "shinythemes")
-
-package.check <- lapply(
-  packages,
-  FUN = function(x) {
-    if (!require(x, character.only = TRUE)) {
-      install.packages(x, dependencies = TRUE)
-      library(x, character.only = TRUE)
-    }
-  }
-)
-
-
-
+library(httr)
+library(jsonlite)
+library(readr)
+library(dplyr)
+library(magrittr)
+library(shiny)
+library(scales)
 
 
 ##
-ui <- shinyUI({
+ui <- shinyUI(fluidPage(
   sidebarPanel(
     
-    htmlOutput("loc_selector"),
+    
+    htmlOutput("rstcd_selector"),
+    htmlOutput("loccd_selector"),
     htmlOutput("field_selector"),
     htmlOutput("start_selector"),
     htmlOutput("end_selector"),
-    textOutput("gdu")
+    downloadButton("downloadData", "Download GDU Data")
     
+    
+  ),
+  
+  mainPanel(
+    
+    tableOutput("gdu")
     
   )
   
-})
+))
 ##
 server <- shinyServer(function(input, output) {
-  urlfile <- "https://raw.githubusercontent.com/EisingerSyngenta/FloweringData/main/2021%20Flowering%20Coordinates.csv"
+  urlfile <- "https://raw.githubusercontent.com/EisingerSyngenta/FloweringData/main/2022%20Locations.csv"
   mydata <- read_csv(url(urlfile))
   
-  output$loc_selector <- renderUI({
+  output$rstcd_selector <- renderUI({
     
     selectInput(
-      inputId = "loc", 
-      label = "Location:",
-      choices = as.character(unique(mydata$Location)))
+      inputId = "rstcd", 
+      label = "RSTCD:",
+      choices = as.character(mydata$RSTCD))
+    
+  })
+  
+  output$loccd_selector <- renderUI({
+    
+    available <- mydata %>% 
+      filter(RSTCD == input$rstcd)
+    
+    selectInput(
+      inputId = "loccd", 
+      label = "LOCCD:",
+      choices = as.character(available$LOCCD))
     
   })
   
   output$field_selector <- renderUI({
     
     available <- mydata %>% 
-      filter(Location == input$loc) %>% 
-      select(Field)
+      filter(RSTCD == input$rstcd) %>% 
+      filter(LOCCD == input$loccd)
     
     selectInput(
-      inputId = "field", 
-      label = "Field:",
-      choices = unique(available))
+      inputId = "placd", 
+      label = "PLACD:",
+      choices = as.character(available$PLACD))
     
   })
   
   output$start_selector <- renderUI({
     
-    available <- mydata %>% 
-      filter(Location == input$loc, Field == input$field) %>% 
-      select(PlantingDate)
-    available$PlantingDate <- strptime(available$PlantingDate, "%m/%d/%Y")
-    available$PlantingDate <- format(available$PlantingDate, "%Y-%m-%d")
-    firstDate <- as.character(seq(as.Date(available$PlantingDate[1]), as.Date(Sys.Date()), by = "days"))
+    available <- mydata %>%
+      filter(RSTCD == input$rstcd, LOCCD == input$loccd, PLACD == input$placd)
+    available$planting_date <- strptime(available$planting_date, "%m/%d/%Y")
+    available$planting_date <- format(available$planting_date, "%Y-%m-%d")
     
-    selectInput(
-      inputId = "start", 
-      label = "First Date:",
-      choices = firstDate)
-    
-  })
-  
-  output$end_selector <- renderUI({
-    
-    end <- as.character(seq(as.Date(input$start), as.Date(Sys.Date()), by = "days"))
-    
-    selectInput(
-      inputId = "end", 
-      label = "End Date:",
-      choices = end)
+    dateRangeInput(
+      inputId = "range",
+      label = "GDU Date Range (Default Is Planted Date to Today):",
+      start = available$planting_date[1],
+      max = Sys.Date() + 1,
+      separator = " to ")
     
   })
   
-  output$gdu <- renderText({
+  gduInput <- reactive({
     
-    input$action
+    coords <- mydata %>% 
+      filter(RSTCD == input$rstcd, LOCCD == input$loccd, PLACD == input$placd) %>% 
+      select(Latitude, Longitude)
     
-    lat <- mydata %>% 
-      filter(Location == input$loc, Field == input$field) %>% 
-      select(Latitude)
-    long <- mydata %>% 
-      filter(Location == input$loc, Field == input$field) %>% 
-      select(Longitude)
-    
-    long <- long$Longitude[1]
-    lat <- lat$Latitude[1]
-    start <- input$start
-    end <- input$end
-    
-    
+    long <- coords$Longitude[1]
+    lat <- coords$Latitude[1]
     
     posting <- paste0('{
                       "units": {
@@ -121,7 +114,7 @@ server <- shinyServer(function(input, output) {
                       },
                       "format": "json",
                       "timeIntervals": [
-                      "', start, 'T+00:00/', end, 'T+00:00"
+                      "', input$range[1], 'T+00:00/', input$range[2], 'T+00:00"
                       ],
                       "timeIntervalsAlignment": "none",
                       "queries": [
@@ -131,7 +124,7 @@ server <- shinyServer(function(input, output) {
                       "timeResolution": "daily",
                       "codes": [
                       {
-                      "code": 730,
+                      "code": 731,
                       "level": "2 m elevation corrected",
                       "aggregation": "sum",
                       "gddBase": 50,
@@ -142,26 +135,39 @@ server <- shinyServer(function(input, output) {
                       ]
   }
                       ')
+    
+    url <- "http://my.meteoblue.com/dataset/query?apikey=syn82hw2eqe"
+    
+    result <- POST(url,
+                   body = posting,
+                   httr::add_headers(`accept` = 'application/json'),
+                   httr::content_type('application/json')) #encode="json"
+    response <- content(result)
+    
+    toSum <- vector()
+    sumDate <- vector()
+    for(i in 1:length(response[[1]]$codes[[1]]$dataPerTimeInterval[[1]]$data[[1]])) {
+      toSum[i] <- response[[1]]$codes[[1]]$dataPerTimeInterval[[1]]$data[[1]][[i]]
+      sumDate[i] <- paste0(substr(response[[1]]$timeIntervals[[1]][[i]], 1, 4), "-",
+                           substr(response[[1]]$timeIntervals[[1]][[i]], 5, 6), "-",
+                           substr(response[[1]]$timeIntervals[[1]][[i]], 7, 8))
+    }
 
-        url <- "http://my.meteoblue.com/dataset/query?apikey=syn82hw2eqe"
-
-        result <- POST(url,
-                       body = posting,
-                       httr::add_headers(`accept` = 'application/json'),
-                       httr::content_type('application/json')) #encode="json"
-        response <- content(result)
-
-        toSum <- vector()
-        for(i in 1:length(response[[1]]$codes[[1]]$dataPerTimeInterval[[1]]$data[[1]])) {
-          toSum[i] <- response[[1]]$codes[[1]]$dataPerTimeInterval[[1]]$data[[1]][[i]]
-        }
-        gdu <- round(sum(toSum))
-        
-        isolate(gdu)
-
+    gduTable <- data.frame(Date = sumDate,
+               DailyGDU = as.integer(toSum),
+               CumulativeGDU = cumsum(as.integer(toSum)))
   })
   
+  output$gdu <- renderTable({
+    gduInput()
+  })
+
+  output$downloadData <- downloadHandler(
+    filename = function() {paste(input$rstcd, input$loccd, input$placd, "GDU.csv")}, 
+    content = function(filename) {write.csv(gduInput(), filename, row.names = FALSE)}
+  )
   
 })
 ##
 shinyApp(ui = ui, server = server)
+
